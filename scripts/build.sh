@@ -28,17 +28,22 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 executable="$bundle/Contents/MacOS/PomodoroBlocker"
 if [[ "${UNIVERSAL:-0}" == 1 ]]; then
     binaries=()
+    helper_binaries=()
     for arch in arm64 x86_64; do
         triple="$arch-apple-macosx14.0"
         scratch="$PWD/.build/universal-$arch"
         xcrun swift build -c "$configuration" --triple "$triple" --scratch-path "$scratch"
         binaries+=("$(xcrun swift build -c "$configuration" --triple "$triple" --scratch-path "$scratch" --show-bin-path)/PomodoroBlocker")
+        helper_binaries+=("$(xcrun swift build -c "$configuration" --triple "$triple" --scratch-path "$scratch" --show-bin-path)/PomodoroDomainHelper")
     done
     xcrun lipo -create "${binaries[@]}" -output "$executable"
     xcrun lipo "$executable" -verify_arch arm64 x86_64
+    xcrun lipo -create "${helper_binaries[@]}" -output "$bundle/Contents/Resources/PomodoroDomainHelper"
+    xcrun lipo "$bundle/Contents/Resources/PomodoroDomainHelper" -verify_arch arm64 x86_64
 else
     xcrun swift build -c "$configuration"
     cp "$(xcrun swift build -c "$configuration" --show-bin-path)/PomodoroBlocker" "$executable"
+    cp "$(xcrun swift build -c "$configuration" --show-bin-path)/PomodoroDomainHelper" "$bundle/Contents/Resources/PomodoroDomainHelper"
 fi
 cp Resources/Info.plist "$bundle/Contents/Info.plist"
 if [[ -n "$version" ]]; then
@@ -52,10 +57,13 @@ fi
 cp Resources/*.caf "$bundle/Contents/Resources/"
 identity="${SIGNING_IDENTITY:--}"
 if [[ "$identity" == - ]]; then
+    codesign --force --sign - "$bundle/Contents/Resources/PomodoroDomainHelper"
     codesign --force --sign - "$bundle"
 else
+    codesign --force --options runtime --timestamp --sign "$identity" "$bundle/Contents/Resources/PomodoroDomainHelper"
     codesign --force --options runtime --timestamp --sign "$identity" "$bundle"
 fi
+codesign --verify --strict "$bundle/Contents/Resources/PomodoroDomainHelper"
 codesign --verify --strict "$bundle"
 rm -rf "$app"
 mv "$bundle" "$app"

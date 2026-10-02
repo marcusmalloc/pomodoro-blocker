@@ -24,7 +24,7 @@ Open **PomodoroBlocker** from Applications. The app isn't notarized; approve its
 - Hold **⌥** and click the clock to reset.
 - Right-click the menu bar icon for **Block List**, **Launch at Login**, and **Quit**.
 
-Return or Space starts and pauses. ↑/↓ or scrolling adjusts minutes. Website blocking asks for an administrator password once per launch; pausing, taking a break, or quitting removes the block.
+Return or Space starts and pauses. ↑/↓ or scrolling adjusts minutes. Website blocking asks for an administrator password once to install its helper, then reuses that permission across app launches and restarts. Pausing, taking a break, or quitting removes the block.
 
 <p align="center">
   <img src="docs/screenshots/block-list.png" alt="Blocked apps and websites" width="600">

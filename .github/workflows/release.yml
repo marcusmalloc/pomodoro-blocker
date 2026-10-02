@@ -75,6 +75,10 @@ jobs:
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./scripts/release.sh "$RELEASE_TAG"
 
+      - name: Verify packaged website blocking helper lifecycle
+        if: steps.existing.outputs.published != 'true'
+        run: python3 scripts/test-domain-helper.py .build/PomodoroBlocker.app/Contents/Resources/PomodoroDomainHelper
+
       - name: Publish complete release
         if: steps.existing.outputs.published != 'true'
         shell: bash

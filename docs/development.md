@@ -52,6 +52,23 @@ Archives are written to `.build/releases/`. `SIGNING_IDENTITY` accepts a Develop
 
 ## Website blocking
 
-Blocking uses `/etc/hosts`, including `www.` variants. Other subdomains need separate entries. Existing connections and proxies can bypass these entries. A helper requests administrator access once per launch and removes the block when focus ends, pauses or resets, or the app quits.
+Blocking uses `/etc/hosts`, including `www.` variants. Other subdomains need separate entries. Existing connections and proxies can bypass these entries. The first focus session installs a root-owned `PomodoroDomainHelper` executable and a per-user launch daemon with one administrator prompt. The daemon stays installed across app launches, login and reboot; focus sessions do not request authorization again. If its background item is disabled, the app reports that instead of requesting another password.
 
-After a crash or power loss, stale entries may remain between `# BEGIN PomodoroBlocker` and `# END PomodoroBlocker`; the next focus session clears them, or they can be removed manually.
+The app writes bounded, validated domain requests into a precreated `0600` file under a root-owned directory. Requests identify the process by UID, PID and kernel start time and have a ten-second lease renewed every two seconds. The daemon acknowledges applied changes, preserves unrelated hosts entries and file permissions, and clears its section on pause, break, quit, process death, lease expiry or daemon restart. Each user's section has separate `uid=` markers. Complete sections from the old temporary helper are migrated automatically.
+
+`DomainBlockingTests` covers request validation, stale process identities, marker migration and preservation of unrelated entries. The helper also accepts `--test <uid> <hosts-copy> <prepared-directory>` only as an unprivileged process using its own UID. The prepared directory must be owned by that user with mode `0755`; this mode never touches system hosts or DNS caches.
+
+After building, verify the helper against disposable files (without `sudo`):
+
+```sh
+python3 scripts/test-domain-helper.py .build/PomodoroBlocker.app/Contents/Resources/PomodoroDomainHelper
+```
+
+To remove the installed background helper, quit the app and run:
+
+```sh
+sudo launchctl bootout "system/com.marcusmalloc.pomodoroblocker.domains.$(id -u)"
+sudo rm "/Library/LaunchDaemons/com.marcusmalloc.pomodoroblocker.domains.$(id -u).plist"
+```
+
+The executable is shared across users. After removing every PomodoroBlocker launch daemon, it can also be deleted from `/Library/PrivilegedHelperTools/com.marcusmalloc.pomodoroblocker.domains`. Runtime request files live under `/var/run/PomodoroBlocker-<uid>` and are cleared at reboot.
