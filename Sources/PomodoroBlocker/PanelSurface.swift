@@ -5,7 +5,7 @@ enum PanelLayout {
     static let cornerRadius: CGFloat = 12
     static let inset: CGFloat = 8
     static let timerWidth: CGFloat = 260
-    static let blockListWidth: CGFloat = 400
+    static let blockListWidth: CGFloat = 558
 }
 
 extension View {

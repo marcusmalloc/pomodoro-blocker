@@ -1,14 +1,14 @@
 import AppKit
 import SwiftUI
 
-/// A searchable table with an inline website editor and installed-app picker. Controls use their natural height.
+/// A quiet, searchable list with an inline website editor and installed-app picker.
 struct BlockListView: View {
     let list: BlockList
+    let onClose: () -> Void
 
-    @State private var mode = Mode.table
+    @State private var mode = Mode.list
     @State private var selection = Set<BlockEntry.ID>()
     @State private var filter = ""
-    @State private var sortOrder: [KeyPathComparator<BlockEntry>] = []
     @State private var typed = ""
     @State private var typedNothing = false
     @FocusState private var focusedField: Field?
@@ -18,29 +18,41 @@ struct BlockListView: View {
     }
 
     private enum Mode {
-        case table, addWebsite, addApp
+        case list, addWebsite, addApp
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: BlockListLayout.spacing) {
             if mode == .addApp {
-                AppPicker(list: list, done: { mode = .table })
+                AppPicker(list: list, done: { mode = .list }, onClose: onClose)
             } else {
-                TextField("Filter", text: $filter)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .focused($focusedField, equals: .filter)
-                    .accessibilityLabel("Filter blocked apps and domains")
-                table
+                HStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        TextField("Search", text: $filter)
+                            .textFieldStyle(.plain)
+                            .focused($focusedField, equals: .filter)
+                            .accessibilityLabel("Search blocked apps and domains")
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 32)
+                    .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+
+                    BlockListCloseButton(action: onClose)
+                }
+                blockedRows
                 Group {
                     if mode == .addWebsite { websiteField } else { bar }
                 }
             }
         }
+        .font(.system(size: 13))
         // Rows that filtering hides are no longer selected, so − can't remove what can't be seen.
         .onChange(of: filter) { selection.formIntersection(rows.map(\.id)) }
         .onChange(of: mode) { _, mode in
-            if mode == .table {
+            if mode == .list {
                 Task { await list.refreshInstalledApps() }
             }
         }
@@ -48,29 +60,32 @@ struct BlockListView: View {
     }
 
     private var rows: [BlockEntry] {
-        let shown = filter.isEmpty
+        filter.isEmpty
             ? list.visibleEntries
             : list.visibleEntries.filter { $0.name.localizedCaseInsensitiveContains(filter) }
-        return sortOrder.isEmpty ? shown : shown.sorted(using: sortOrder)
     }
 
-    private var table: some View {
-        Table(rows, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("Name", value: \.name) { entry in
-                HStack(spacing: 6) {
-                    icon(for: entry).accessibilityHidden(true)
-                    Text(entry.name).lineLimit(1).help(entry.name)
-                }
+    private var blockedRows: some View {
+        let entries = rows
+        return List(entries, selection: $selection) { entry in
+            HStack(spacing: 11) {
+                icon(for: entry).accessibilityHidden(true)
+                Text(entry.name).lineLimit(1).help(entry.name)
+                Spacer(minLength: 0)
             }
-            TableColumn("Kind", value: \.kind.label) { entry in
-                Text(entry.kind.label).foregroundStyle(.secondary)
-            }
-            .width(64)
+            .frame(height: BlockListLayout.rowHeight)
+            .contentShape(.rect)
+            .alignmentGuide(.listRowSeparatorLeading) { _ in -10 }
+            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10))
+            .listRowSeparator(entry.id == entries.last?.id ? .hidden : .visible, edges: .bottom)
+            .listRowSeparatorTint(.primary.opacity(0.08))
+            .tag(entry.id)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .listStyle(.plain)
+        .environment(\.defaultMinListRowHeight, BlockListLayout.rowHeight)
         .scrollContentBackground(.hidden)
-        .controlSize(.small)
         .frame(height: BlockListLayout.viewportHeight)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay {
             if rows.isEmpty {
                 Text(filter.isEmpty ? "Your block list is empty." : "No matching apps or domains.")
@@ -87,44 +102,64 @@ struct BlockListView: View {
     private func icon(for entry: BlockEntry) -> some View {
         if entry.kind == .website {
             Image(systemName: "globe")
+                .font(.system(size: 18))
                 .foregroundStyle(.secondary)
-                .frame(width: 16, height: 16)
+                .frame(width: BlockListLayout.iconSize, height: BlockListLayout.iconSize)
         } else if let url = list.installedAppURL(for: entry.value) {
             Image(nsImage: AppIcons.icon(forFile: url))
                 .resizable()
-                .frame(width: 16, height: 16)
+                .frame(width: BlockListLayout.iconSize, height: BlockListLayout.iconSize)
         } else {
             // An app can disappear between the availability refresh and rendering its row.
             Image(systemName: "app.dashed")
+                .font(.system(size: 18))
                 .foregroundStyle(.secondary)
-                .frame(width: 16, height: 16)
+                .frame(width: BlockListLayout.iconSize, height: BlockListLayout.iconSize)
         }
     }
 
     private var bar: some View {
-        HStack(spacing: 4) {
-            Menu {
-                Button("Website…") {
-                    typed = ""
-                    typedNothing = false
-                    mode = .addWebsite
+        HStack {
+            HStack(spacing: 0) {
+                Menu {
+                    Button("Website…") {
+                        typed = ""
+                        typedNothing = false
+                        mode = .addWebsite
+                    }
+                    Button("App…") { mode = .addApp }
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 28, height: 28)
                 }
-                Button("App…") { mode = .addApp }
-            } label: {
-                Label("Add", systemImage: "plus")
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .tint(.secondary)
+                .fixedSize()
+                .accessibilityLabel("Add a website or an app")
+                .help("Add a website or an app")
+
+                Rectangle()
+                    .fill(.primary.opacity(0.12))
+                    .frame(width: 1, height: 14)
+
+                Button(action: removeSelected) {
+                    Image(systemName: "minus")
+                        .frame(width: 28, height: 28)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .disabled(selection.isEmpty)
+                .accessibilityLabel("Remove selected blocked apps and domains")
+                .help("Remove the selected rows")
             }
-            .menuStyle(.button)
-            .fixedSize()
-            .help("Add a website or an app")
-            Button(action: removeSelected) {
-                Image(systemName: "minus")
-            }
-            .disabled(selection.isEmpty)
-            .accessibilityLabel("Remove selected blocked apps and domains")
-            .help("Remove the selected rows")
+            .foregroundStyle(.secondary)
+            .background(.primary.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+
             Spacer()
             Button("Restore Defaults") { list.restoreDefaults() }
                 .buttonStyle(.borderless)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .help("Adds back any default app or website that was removed")
         }
@@ -138,7 +173,7 @@ struct BlockListView: View {
                 .focused($focusedField, equals: .website)
                 .accessibilityLabel("Website address to block")
                 .onSubmit(addTyped)
-                .onExitCommand { mode = .table }
+                .onExitCommand { mode = .list }
                 .onAppear { focusedField = .website }
                 .onChange(of: typed) { typedNothing = false }
             HStack {
@@ -149,7 +184,7 @@ struct BlockListView: View {
                         .foregroundStyle(.red)
                 }
                 Spacer()
-                Button("Cancel") { mode = .table }
+                Button("Cancel") { mode = .list }
                 Button("Add", action: addTyped)
                     .disabled(typed.allSatisfy(\.isWhitespace))
             }
@@ -161,7 +196,7 @@ struct BlockListView: View {
         guard !typed.allSatisfy(\.isWhitespace) else { return }
         if list.addWebsites(from: typed) {
             selection = []
-            mode = .table
+            mode = .list
         } else {
             typedNothing = true
         }
@@ -180,24 +215,7 @@ struct BlockListPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: BlockListLayout.spacing) {
-            HStack(spacing: 8) {
-                Text("Block List")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 20)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close block list")
-                .help("Close")
-            }
-            .padding(.horizontal, 4)
-
-            BlockListView(list: timer.blockList)
+            BlockListView(list: timer.blockList, onClose: onClose)
 
             if let problem = timer.domainProblem {
                 Label(problem, systemImage: "exclamationmark.triangle")
@@ -206,15 +224,35 @@ struct BlockListPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(PanelLayout.inset)
+        .padding(BlockListLayout.inset)
         .frame(width: PanelLayout.blockListWidth)
         .pomodoroSurface()
         .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-/// The table and app picker share a viewport; controls below them use only the space they need.
+struct BlockListCloseButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close block list")
+        .help("Close")
+    }
+}
+
+/// Seven comfortable rows share a viewport with the installed-app picker.
 enum BlockListLayout {
-    static let viewportHeight: CGFloat = 208
-    static let spacing: CGFloat = 10
+    static let rowHeight: CGFloat = 42
+    static let iconSize: CGFloat = 21
+    static let viewportHeight: CGFloat = 7 * rowHeight
+    static let spacing: CGFloat = 12
+    static let inset: CGFloat = 16
 }

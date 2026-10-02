@@ -4,6 +4,7 @@ import SwiftUI
 struct AppPicker: View {
     let list: BlockList
     let done: () -> Void
+    let onClose: () -> Void
 
     @State private var apps: [InstalledApp] = []
     @State private var running = Set<String>()
@@ -19,6 +20,7 @@ struct AppPicker: View {
                     .focused($searchFocused)
                     .accessibilityLabel("Search available apps")
                 Button("Cancel", action: done)
+                BlockListCloseButton(action: onClose)
             }
             .controlSize(.small)
 

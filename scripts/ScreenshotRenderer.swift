@@ -32,7 +32,9 @@ enum ScreenshotRenderer {
         let captures: [(String, NSWindow)] = [
             ("focus", stage(TimerPanel(timer: focus), size: NSSize(width: 370, height: 219))),
             ("break", stage(TimerPanel(timer: rest), size: NSSize(width: 370, height: 219))),
-            ("block-list", stage(BlockListPanel(timer: focus, onClose: {}), size: NSSize(width: 500, height: 424)))
+            ("block-list", stage(BlockListPanel(timer: focus, onClose: {}),
+                                 size: NSSize(width: PanelLayout.blockListWidth + 100,
+                                              height: BlockListLayout.viewportHeight + 216)))
         ]
         // Give AppKit-backed text fields and tables a normal layout/display cycle before capture.
         app.finishLaunching()
