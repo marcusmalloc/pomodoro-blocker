@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate version
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf 'Use a stable tag such as v1.2.3.\n' >&2
+            exit 1
+          fi
+          printf 'RELEASE_VERSION=%s\n' "${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Preserve already published releases
+        id: existing
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft,assets > "$RUNNER_TEMP/release.json"; then
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          release = json.loads((Path(os.environ["RUNNER_TEMP"]) / "release.json").read_text())
+          published = not release["isDraft"]
+          if published:
+              archive = f'PomodoroBlocker-{os.environ["RELEASE_VERSION"]}-universal.zip'
+              expected = {archive, archive + ".sha256"}
+              if not expected <= {asset["name"] for asset in release["assets"]}:
+                  raise SystemExit("Published release has missing assets; create a new version instead of replacing it.")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"published={str(published).lower()}\n")
+          PY
+          else
+            printf 'published=false\n' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        if: steps.existing.outputs.published != 'true'
+        run: xcrun swift test
+
+      - name: Package Intel and Apple Silicon app
+        if: steps.existing.outputs.published != 'true'
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./scripts/release.sh "$RELEASE_TAG"
+
+      - name: Publish complete release
+        if: steps.existing.outputs.published != 'true'
+        shell: bash
+        run: |
+          archive=".build/releases/PomodoroBlocker-$RELEASE_VERSION-universal.zip"
+          if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > "$RUNNER_TEMP/is-draft"; then
+            if [[ "$(cat "$RUNNER_TEMP/is-draft")" != true ]]; then
+              printf 'Release was published concurrently; refusing to replace its assets.\n' >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "$archive" "$archive.sha256" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$archive" "$archive.sha256" \
+              --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - name: Check tap credentials
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+        run: |
+          if [[ -z "$TAP_DEPLOY_KEY" ]]; then
+            printf 'Set HOMEBREW_TAP_SSH_KEY to a write deploy key for marcusmalloc/homebrew-tap, then rerun this workflow.\n' >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: marcusmalloc/homebrew-tap
+          ref: main
+          path: homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
+
+      - name: Publish cask
+        working-directory: homebrew-tap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          for attempt in 1 2 3; do
+            git pull --ff-only
+            python3 scripts/update_pomodoro.py
+            git add Casks/pomodoro-blocker.rb
+            if git diff --cached --quiet; then
+              printf 'Homebrew already has the latest release.\n'
+              exit 0
+            fi
+            git commit -m 'Update Pomodoro Blocker cask'
+            if git push; then
+              exit 0
+            fi
+            # Only this generated cask commit is discarded before retrying;
+            # update against the newer tap instead of overwriting other work.
+            git fetch origin main
+            git reset --hard origin/main
+          done
+          printf 'Could not publish the cask after three attempts. Rerun this workflow.\n' >&2
+          exit 1
