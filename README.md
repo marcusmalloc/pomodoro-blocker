@@ -1,8 +1,10 @@
 # Pomodoro Blocker
 
-A tiny macOS menu bar timer that blocks distracting apps and websites while you focus.
+<p align="center">
+  <img src="docs/screenshots/focus.png" alt="Pomodoro focus timer" width="600">
+</p>
 
-<img src="docs/screenshots/focus.jpg" alt="Focus timer" width="260"> <img src="docs/screenshots/break.jpg" alt="Break timer" width="260">
+A tiny macOS menu bar timer that blocks distracting apps and websites while you focus.
 
 ## Install
 
@@ -24,6 +26,8 @@ Open **PomodoroBlocker** from Applications. The app isn't notarized; approve its
 
 Return or Space starts and pauses. ↑/↓ or scrolling adjusts minutes. Website blocking asks for an administrator password once per launch; pausing, taking a break, or quitting removes the block.
 
-<img src="docs/screenshots/block-list.jpg" alt="Blocked apps and websites" width="400">
+<p align="center">
+  <img src="docs/screenshots/block-list.png" alt="Blocked apps and websites" width="600">
+</p>
 
 [Build and release](docs/development.md) · [Third-party credits](THIRD_PARTY_NOTICES.md)

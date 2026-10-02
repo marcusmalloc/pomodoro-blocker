@@ -21,6 +21,14 @@ Tests use isolated preferences and disable blocking. Use `PomodoroTimer(defaults
 
 After UI changes, check clicks, double-click editing, Return/Space, Escape, arrows, scrolling and Option reset. Switch phases while idle, paused and running. Closing during a pending click must leave the timer stopped. Check the block list, filtering, adding/removing items and reopening without flashes. Only installed apps should appear.
 
+## Screenshots
+
+```sh
+scripts/screenshots.sh
+```
+
+This renders the production panels on a BareTab-style gradient and writes cursor-free PNGs to `docs/screenshots/`. It uses isolated preferences, disables blocking and includes sample apps only when installed. Pass an output directory to preview images without replacing the README assets.
+
 ## Releases
 
 Push a stable version tag:
