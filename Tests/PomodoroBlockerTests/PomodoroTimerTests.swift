@@ -15,9 +15,11 @@ final class PomodoroTimerTests: XCTestCase {
         return (defaults, name)
     }
 
-    private func makeTimer(defaults: UserDefaults, clock: Clock? = nil) -> PomodoroTimer {
+    private func makeTimer(defaults: UserDefaults, clock: Clock? = nil,
+                           onPhaseEnd: (() -> Void)? = nil) -> PomodoroTimer {
         let clock = clock ?? Clock()
         return PomodoroTimer(defaults: defaults, blockingEnabled: false, automaticallyTicks: false,
+                             onPhaseEnd: onPhaseEnd,
                              now: { clock.date })
     }
 
@@ -265,5 +267,96 @@ final class PomodoroTimerTests: XCTestCase {
         XCTAssertEqual(timer.currentSeconds, 120)
         timer.reset()
         XCTAssertFalse(timer.onBreak)
+    }
+
+    func testPhaseEndFeedbackFiresOnceForEachNaturalExpiration() async {
+        let (defaults, name) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let clock = Clock()
+        var feedbackCount = 0
+        let timer = makeTimer(defaults: defaults, clock: clock,
+                              onPhaseEnd: { feedbackCount += 1 })
+        timer.setDuration(1, onBreak: false)
+        timer.setDuration(2, onBreak: true)
+        timer.toggle()
+        XCTAssertEqual(feedbackCount, 0)
+
+        clock.date += 59
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 0)
+        clock.date += 1
+        timer.refresh()
+        XCTAssertTrue(timer.onBreak)
+        XCTAssertEqual(feedbackCount, 1)
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 1)
+
+        clock.date += 119
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 1)
+        clock.date += 1
+        timer.refresh()
+        XCTAssertFalse(timer.onBreak)
+        XCTAssertEqual(feedbackCount, 2)
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 2)
+    }
+
+    func testManualTimerControlsDoNotProducePhaseEndFeedback() async {
+        let (defaults, name) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let clock = Clock()
+        var feedbackCount = 0
+        let timer = makeTimer(defaults: defaults, clock: clock,
+                              onPhaseEnd: { feedbackCount += 1 })
+        timer.setDuration(1, onBreak: false)
+        timer.setDuration(1, onBreak: true)
+        timer.refresh()
+        timer.selectPhase(onBreak: true)
+        timer.selectPhase(onBreak: false)
+        XCTAssertEqual(feedbackCount, 0)
+
+        timer.toggle()
+        clock.date += 10
+        timer.toggle()
+        XCTAssertEqual(feedbackCount, 0)
+        clock.date += 100
+        timer.refresh()
+        timer.selectPhase(onBreak: true)
+        XCTAssertEqual(feedbackCount, 0)
+
+        timer.toggle()
+        clock.date += 10
+        timer.selectPhase(onBreak: false)
+        XCTAssertEqual(feedbackCount, 0)
+        timer.reset()
+        clock.date += 100
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 0)
+    }
+
+    func testDelayedRefreshProducesOneCatchUpAlertAcrossMultiplePhases() async {
+        let (defaults, name) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let clock = Clock()
+        var feedbackCount = 0
+        let timer = makeTimer(defaults: defaults, clock: clock,
+                              onPhaseEnd: { feedbackCount += 1 })
+        timer.setDuration(1, onBreak: false)
+        timer.setDuration(2, onBreak: true)
+        timer.toggle()
+
+        clock.date += 550 // Three full focus/break cycles, then ten seconds of focus.
+        timer.refresh()
+        XCTAssertFalse(timer.onBreak)
+        XCTAssertEqual(timer.currentSeconds, 50)
+        XCTAssertEqual(feedbackCount, 1)
+        timer.refresh()
+        XCTAssertEqual(feedbackCount, 1)
+
+        clock.date += 50
+        timer.refresh()
+        XCTAssertTrue(timer.onBreak)
+        XCTAssertEqual(feedbackCount, 2)
     }
 }

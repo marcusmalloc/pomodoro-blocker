@@ -22,7 +22,7 @@ final class PomodoroTimer {
     @ObservationIgnored private let store: UserDefaults
     @ObservationIgnored private let currentDate: () -> Date
     @ObservationIgnored private let automaticallyTicks: Bool
-    @ObservationIgnored private let feedbackEnabled: Bool
+    @ObservationIgnored private let onPhaseEnd: () -> Void
     private let blocker: Blocker?
 
     let blockList: BlockList
@@ -35,17 +35,19 @@ final class PomodoroTimer {
 
     /// Disabling blocking avoids constructing the blocker at all, so previews and tests cannot quit
     /// apps or request hosts-file access. An isolated defaults store also keeps their edits separate.
+    /// Those timers are silent unless an explicit phase-end callback is supplied.
     init(
         defaults: UserDefaults = .standard,
         blockList: BlockList? = nil,
         blockingEnabled: Bool = true,
         automaticallyTicks: Bool = true,
+        onPhaseEnd: (() -> Void)? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         store = defaults
         currentDate = now
         self.automaticallyTicks = automaticallyTicks
-        feedbackEnabled = blockingEnabled
+        self.onPhaseEnd = onPhaseEnd ?? (blockingEnabled ? TimerSound.play : {})
         let focus = Self.savedMinutes(in: defaults, key: "focusMinutes", fallback: 25)
         let rest = Self.savedMinutes(in: defaults, key: "breakMinutes", fallback: 5)
         focusMinutes = focus
@@ -143,7 +145,7 @@ final class PomodoroTimer {
         remaining = deadline.timeIntervalSince(date)
         if changedPhase {
             endDate = deadline
-            if feedbackEnabled { NSSound(named: "tomato-timer-buzz")?.play() }
+            onPhaseEnd()
         }
     }
 

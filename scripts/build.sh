@@ -52,8 +52,8 @@ fi
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$bundle/Contents/Info.plist"
 fi
-# Sounds go in the bundle's Contents/Resources, where NSSound(named:) looks. SwiftPM's own resource
-# bundles aren't used because Bundle.module can't find them inside a hand-assembled .app.
+# Sounds go in Contents/Resources, where TimerSound resolves their explicit URLs. SwiftPM's
+# resource bundles aren't used because Bundle.module can't find them inside a hand-assembled .app.
 cp Resources/*.caf "$bundle/Contents/Resources/"
 identity="${SIGNING_IDENTITY:--}"
 if [[ "$identity" == - ]]; then
