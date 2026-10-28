@@ -89,6 +89,61 @@ final class DomainBlockingTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(DomainResponse.self, from: encoder.encode(response)), response)
     }
 
+    func testLegacyHelperResponseDecodesAndRequiresOneUpgrade() throws {
+        let legacyJSON = Data(#"{"version":1,"requestID":null,"problem":"Couldn't open the hosts directory"}"#.utf8)
+        let response = try JSONDecoder().decode(DomainResponse.self, from: legacyJSON)
+        XCTAssertNil(response.helperRevision)
+        XCTAssertEqual(response.problem, "Couldn't open the hosts directory")
+        XCTAssertTrue(response.needsHelperUpgrade(installedRevision: 1))
+        XCTAssertFalse(response.needsHelperUpgrade(installedRevision: DomainHelperPaths.helperRevision))
+    }
+
+    func testUpdatedHelperPreservesLegacyResponseAndRequestWireFormat() throws {
+        struct LegacyResponse: Decodable {
+            let version: Int
+            let requestID: String?
+            let problem: String?
+        }
+        let response = DomainResponse(requestID: "acknowledged", problem: nil)
+        let legacyResponse = try JSONDecoder().decode(LegacyResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(legacyResponse.version, 1)
+        XCTAssertEqual(legacyResponse.requestID, "acknowledged")
+        XCTAssertNil(legacyResponse.problem)
+
+        let legacyRequestJSON = Data(#"{"version":1,"id":"1B82FD4F-682E-4766-81E6-4AF87300B90A","process":{"pid":123,"uid":501,"startedSeconds":1799000000,"startedMicroseconds":100},"hostNames":["example.com"],"expiresAt":1800000010}"#.utf8)
+        let legacyRequest = try JSONDecoder().decode(DomainRequest.self, from: legacyRequestJSON)
+        XCTAssertTrue(legacyRequest.isValid(for: uid, now: now))
+        XCTAssertEqual(request().version, 1)
+    }
+
+    func testCurrentAndFutureHelpersNeverRequireReinstallOrDowngrade() {
+        let current = DomainHelperPaths.helperRevision
+        for runningRevision in [current, current + 1] {
+            let response = DomainResponse(requestID: nil, problem: nil, helperRevision: runningRevision)
+            for installedRevision in [1, current, current + 1] {
+                XCTAssertFalse(response.needsHelperUpgrade(installedRevision: installedRevision))
+            }
+        }
+        let oldRuntime = DomainResponse(requestID: nil, problem: nil, helperRevision: 1)
+        XCTAssertTrue(oldRuntime.needsHelperUpgrade(installedRevision: 1))
+        XCTAssertFalse(oldRuntime.needsHelperUpgrade(installedRevision: current))
+        XCTAssertFalse(oldRuntime.needsHelperUpgrade(installedRevision: current + 1))
+    }
+
+    func testInvalidHelperVersionsAndRevisionsNeverAuthorizeInstallation() {
+        for version in [-1, 0, DomainHelperPaths.version + 1] {
+            var response = DomainResponse(requestID: nil, problem: nil, helperRevision: 1)
+            response.version = version
+            XCTAssertFalse(response.needsHelperUpgrade(installedRevision: 1))
+        }
+        for revision in [-1, 0] {
+            let response = DomainResponse(requestID: nil, problem: nil, helperRevision: revision)
+            XCTAssertFalse(response.needsHelperUpgrade(installedRevision: 1))
+            let legacy = DomainResponse(requestID: nil, problem: nil, helperRevision: nil)
+            XCTAssertFalse(legacy.needsHelperUpgrade(installedRevision: revision))
+        }
+    }
+
     func testHostsLifecyclePreservesUnrelatedEntriesAndDeduplicates() throws {
         let original = "# System entries\n127.0.0.1 localhost\n::1 localhost\n192.0.2.1 private.example\n"
         let active = try HostsFile.updated(original, hostNames: ["example.com", "example.com", "www.example.com"], uid: uid)

@@ -132,9 +132,20 @@ final class DomainBlocker {
             && plist["ProgramArguments"] as? [String] == [DomainHelperPaths.executable, "\(userID)"]
             && plist["KeepAlive"] as? Bool == true && plist["RunAtLoad"] as? Bool == true
     }
+    private nonisolated static func needsHelperUpgrade(userID: uid_t) -> Bool {
+        let status = DomainHelperPaths.directory(for: userID).appending(path: "status.json")
+        guard let info = trustedFile(status),
+              Date().timeIntervalSince1970 - Double(info.st_mtimespec.tv_sec) < 5,
+              let responseData = try? Data(contentsOf: status), responseData.count <= 16_384,
+              let response = try? JSONDecoder().decode(DomainResponse.self, from: responseData),
+              let plistData = try? Data(contentsOf: URL(filePath: DomainHelperPaths.plist(for: userID))),
+              let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
+        else { return false }
+        return response.needsHelperUpgrade(installedRevision: plist["PomodoroBlockerHelperRevision"] as? Int ?? 1)
+    }
     /// An installed but disabled helper reports an error instead of asking for permission again.
     private nonisolated static func ensureHelper(userID: uid_t) async -> Result<Void, Failure> {
-        if !isInstalled(userID: userID) {
+        if !isInstalled(userID: userID) || needsHelperUpgrade(userID: userID) {
             guard let binary = Bundle.main.resourceURL?.appending(path: "PomodoroDomainHelper"),
                   let contents = try? Data(contentsOf: binary) else {
                 return .failure(Failure(message: "Website blocking helper is missing. Reinstall PomodoroBlocker."))
@@ -169,6 +180,7 @@ final class DomainBlocker {
                let data = try? Data(contentsOf: status), data.count <= 16_384,
                let response = try? JSONDecoder().decode(DomainResponse.self, from: data),
                response.version == DomainHelperPaths.version,
+               (response.helperRevision ?? 1) >= DomainHelperPaths.helperRevision,
                FileManager.default.isWritableFile(atPath: directory.appending(path: "request.json").path) {
                 return .success(())
             }
@@ -205,7 +217,7 @@ final class DomainBlocker {
     }
     private nonisolated static let elevate = #"""
         on run argv
-            set reason to "PomodoroBlocker needs to install its website blocking helper. This permission is only needed once."
+            set reason to "PomodoroBlocker needs to install or update its website blocking helper. Focus sessions reuse this permission."
             set shellCommand to "/bin/sh -c " & quoted form of (item 1 of argv)
             repeat with i from 2 to count of argv
                 set shellCommand to shellCommand & " " & quoted form of (item i of argv)
@@ -249,6 +261,7 @@ final class DomainBlocker {
         <key>RunAtLoad</key><true/>
         <key>KeepAlive</key><true/>
         <key>ThrottleInterval</key><integer>2</integer>
+        <key>PomodoroBlockerHelperRevision</key><integer>\#(DomainHelperPaths.helperRevision)</integer>
         </dict></plist>
         EOF
         chown root:wheel "$staging/daemon.plist"

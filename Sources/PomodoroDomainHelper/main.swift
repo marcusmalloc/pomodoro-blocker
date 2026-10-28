@@ -203,8 +203,12 @@ private final class HostsWriter {
 
     func apply(_ names: [String]) throws {
         let url = URL(filePath: path)
-        // /etc is a system symlink on macOS. Resolve its parent while refusing a symlink for hosts itself.
-        let parentPath = url.deletingLastPathComponent().resolvingSymlinksInPath().path
+        // Foundation maps canonical /private/etc and /private/tmp back to /etc and /tmp. Those are
+        // symlinks, which O_NOFOLLOW correctly rejects. POSIX realpath retains the actual directory.
+        guard let parentPath = realpath(url.deletingLastPathComponent().path, nil) else {
+            throw failure("Couldn't resolve the hosts directory")
+        }
+        defer { free(parentPath) }
         let parent = open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parent >= 0 else { throw failure("Couldn't open the hosts directory") }
         defer { close(parent) }

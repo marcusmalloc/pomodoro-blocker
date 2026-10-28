@@ -4,6 +4,7 @@ import Foundation
 /// Paths shared by the app and its installed privileged helper.
 public enum DomainHelperPaths {
     public static let version = 1
+    public static let helperRevision = 2
     public static let executable = "/Library/PrivilegedHelperTools/com.marcusmalloc.pomodoroblocker.domains"
 
     public static func label(for uid: uid_t) -> String {
@@ -90,10 +91,21 @@ public struct DomainResponse: Codable, Equatable, Sendable {
     public var version: Int = DomainHelperPaths.version
     public var requestID: String?
     public var problem: String?
+    /// Missing in the original helper; requests remain wire-compatible across helper upgrades.
+    public var helperRevision: Int?
 
-    public init(requestID: String?, problem: String?) {
+    public init(requestID: String?, problem: String?, helperRevision: Int? = DomainHelperPaths.helperRevision) {
         self.requestID = requestID
         self.problem = problem
+        self.helperRevision = helperRevision
+    }
+
+    /// Missing or stale status never authorizes another installation; callers establish freshness first.
+    public func needsHelperUpgrade(installedRevision: Int) -> Bool {
+        let runningRevision = helperRevision ?? 1
+        return version == DomainHelperPaths.version && installedRevision > 0
+            && installedRevision < DomainHelperPaths.helperRevision
+            && runningRevision > 0 && runningRevision < DomainHelperPaths.helperRevision
     }
 }
 
