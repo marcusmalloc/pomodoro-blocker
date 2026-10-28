@@ -268,6 +268,13 @@ final class DomainBlocker {
         chmod 644 "$staging/daemon.plist"
         plutil -lint "$staging/daemon.plist" >/dev/null
         launchctl bootout "system/$label" >/dev/null 2>&1 || true
+        # bootout returns while launchd still holds the job, and bootstrapping it then fails with error 5.
+        attempts=0
+        while launchctl print "system/$label" >/dev/null 2>&1; do
+            [ "$attempts" -lt 100 ] || exit 1
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
         mv "$staging/helper" "$helper"
         mv "$staging/daemon.plist" "$plist"
         launchctl enable "system/$label"
