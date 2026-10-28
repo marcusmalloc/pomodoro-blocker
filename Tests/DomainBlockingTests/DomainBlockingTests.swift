@@ -130,6 +130,11 @@ final class DomainBlockingTests: XCTestCase {
         XCTAssertFalse(oldRuntime.needsHelperUpgrade(installedRevision: current + 1))
     }
 
+    func testInstalledAndRunningRevisionTwoHelperNeedsUpgrade() {
+        let running = DomainResponse(requestID: nil, problem: nil, helperRevision: 2)
+        XCTAssertTrue(running.needsHelperUpgrade(installedRevision: 2))
+    }
+
     func testInvalidHelperVersionsAndRevisionsNeverAuthorizeInstallation() {
         for version in [-1, 0, DomainHelperPaths.version + 1] {
             var response = DomainResponse(requestID: nil, problem: nil, helperRevision: 1)
@@ -210,5 +215,99 @@ final class DomainBlockingTests: XCTestCase {
     func testAppendToFileWithoutFinalNewlineKeepsEntrySeparate() throws {
         let updated = try HostsFile.updated("127.0.0.1 localhost", hostNames: ["example.com"], uid: uid)
         XCTAssertTrue(updated.hasPrefix("127.0.0.1 localhost\n# BEGIN PomodoroBlocker uid=501\n"))
+    }
+
+    func testEachUserGetsAnAnchorUnderTheBootTimeAppleHook() {
+        XCTAssertEqual(PacketFilter.anchor(for: 501), "com.apple/000.PomodoroBlocker.501")
+        XCTAssertNotEqual(PacketFilter.anchor(for: 501), PacketFilter.anchor(for: 502))
+    }
+
+    func testPfReadsRulesAsStatefulWebConnectionsWithStaleOnesResetAndQUICBlocked() throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/sbin/pfctl")
+        // -n parses without loading, which needs no privileges.
+        process.arguments = ["-n", "-v", "-a", PacketFilter.anchor(for: uid), "-f", "-"]
+        let input = Pipe(), output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try input.fileHandleForWriting.write(contentsOf: Data(PacketFilter.rules.utf8))
+        try input.fileHandleForWriting.close()
+        try process.run()
+        let parsed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertEqual(parsed, """
+            pass out proto tcp from any to any port = 80 flags S/SA keep state
+            pass out proto tcp from any to any port = 443 flags S/SA keep state
+            block return out quick proto tcp from any to any port = 80 flags /S
+            block return out quick proto tcp from any to any port = 443 flags /S
+            block return out quick proto udp from any to any port = 443
+
+            """)
+    }
+
+    func testEnableTokenComesFromExactlyOneWellFormedTokenLine() {
+        let enabled = "No ALTQ support in kernel\nALTQ related functions disabled\npf enabled\nToken : 59484813201413567\n"
+        XCTAssertEqual(PacketFilter.enableToken(in: enabled), 59_484_813_201_413_567)
+        let malformed = [
+            "", "pf enabled\n", "Token : \n", "Token : 12a\n", "Token : -1\n", "Token : +1\n", "Token : 1 \n",
+            " Token : 1\n", "Token: 1\n", "Token : 18446744073709551616\n", "Token : 1\nToken : 2\n",
+        ]
+        for output in malformed {
+            XCTAssertNil(PacketFilter.enableToken(in: output), output)
+        }
+    }
+
+    func testCutoffWaitsForTheHostsBlockThenCutsOnce() {
+        var cutoff = ConnectionCutoff()
+        let start = ContinuousClock.now
+        let names: Set = ["example.com", "www.example.com"]
+        XCTAssertNil(cutoff.update(requested: names, hostsApplied: false, now: start))
+        XCTAssertNil(cutoff.update(requested: names, hostsApplied: true, now: start + .seconds(3)))
+        XCTAssertNil(cutoff.update(requested: names, hostsApplied: true, now: start + .milliseconds(4_900)))
+        XCTAssertNil(cutoff.update(requested: names, hostsApplied: false, now: start + .seconds(5)))
+        XCTAssertEqual(cutoff.update(requested: names, hostsApplied: true, now: start + .seconds(6)), .cut)
+        XCTAssertNil(cutoff.update(requested: names, hostsApplied: true, now: start + .seconds(60)))
+    }
+
+    func testCutoffCutsAgainForAddedAndReaddedNames() {
+        var cutoff = ConnectionCutoff()
+        let start = ContinuousClock.now
+        let both: Set = ["a.example", "b.example"]
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start))
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(1)))
+        XCTAssertEqual(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(2)), .cut)
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(3)))
+        XCTAssertEqual(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(5)), .cut)
+
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(6)))
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(7)))
+        XCTAssertEqual(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(9)), .cut)
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(60)))
+    }
+
+    func testNameRemovedWhileACutIsPendingIsNotCoveredByIt() {
+        var cutoff = ConnectionCutoff()
+        let start = ContinuousClock.now
+        let both: Set = ["a.example", "b.example"]
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start))
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(1)))
+        XCTAssertEqual(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(2)), .cut)
+        XCTAssertNil(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(3)))
+        XCTAssertEqual(cutoff.update(requested: both, hostsApplied: true, now: start + .seconds(5)), .cut)
+    }
+
+    func testEveryBlockGetsItsOwnCutAndEndingOneDropsItsPendingCut() {
+        var cutoff = ConnectionCutoff()
+        let start = ContinuousClock.now
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start))
+        XCTAssertEqual(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(2)), .cut)
+        XCTAssertEqual(cutoff.update(requested: [], hostsApplied: true, now: start + .seconds(3)), .release)
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(4)))
+        XCTAssertEqual(cutoff.update(requested: [], hostsApplied: false, now: start + .seconds(5)), .release)
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(7)))
+        XCTAssertNil(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .milliseconds(8_900)))
+        XCTAssertEqual(cutoff.update(requested: ["a.example"], hostsApplied: true, now: start + .seconds(9)), .cut)
     }
 }

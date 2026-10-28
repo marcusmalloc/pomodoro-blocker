@@ -4,7 +4,7 @@ import Foundation
 /// Paths shared by the app and its installed privileged helper.
 public enum DomainHelperPaths {
     public static let version = 1
-    public static let helperRevision = 2
+    public static let helperRevision = 3
     public static let executable = "/Library/PrivilegedHelperTools/com.marcusmalloc.pomodoroblocker.domains"
 
     public static func label(for uid: uid_t) -> String {
@@ -222,5 +222,66 @@ public enum HostsFile {
             if markerUID == uid { return true }
         }
         return false
+    }
+}
+
+/// Pure pf configuration. Browsers reuse connections opened before a block without a new DNS lookup, so hosts
+/// entries never reach them. Running pfctl and keeping its enable reference belong to the helper.
+public enum PacketFilter {
+    /// macOS evaluates anchors under `com.apple/*` from its boot-time ruleset, which stays untouched.
+    public static func anchor(for uid: uid_t) -> String {
+        "com.apple/000.PomodoroBlocker.\(uid)"
+    }
+
+    /// New connections get state from their SYN. Other web packets without state are reset, so browsers reconnect
+    /// through DNS and hit the hosts block, and QUIC falls back to TCP. The pass rule isn't quick, so a later
+    /// anchor's block, such as a VPN kill switch, still wins.
+    public static let rules = """
+        pass out proto tcp from any to any port {80, 443} flags S/SA keep state
+        block return out quick proto tcp from any to any port {80, 443} flags /S
+        block return out quick proto udp from any to any port 443
+
+        """
+
+    /// `pfctl -E` reports its enable reference as `Token : <digits>` among other diagnostics.
+    public static func enableToken(in output: String) -> UInt64? {
+        let prefix = "Token : "
+        let lines = output.split(separator: "\n").filter { $0.hasPrefix(prefix) }
+        guard lines.count == 1 else { return nil }
+        return token(lines[0].dropFirst(prefix.count))
+    }
+
+    public static func token(_ digits: some StringProtocol) -> UInt64? {
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return UInt64(digits)
+    }
+}
+
+/// Decides when the helper resets existing web connections. A cut covers the names blocked when it was scheduled.
+/// A name added later, or removed and added again, needs another cut.
+public struct ConnectionCutoff {
+    public enum Action { case cut, release }
+
+    private var covered = Set<String>()
+    private var pending: (names: Set<String>, due: ContinuousClock.Instant)?
+
+    public init() {}
+
+    public mutating func update(requested: Set<String>, hostsApplied: Bool, now: ContinuousClock.Instant) -> Action? {
+        covered.formIntersection(requested)
+        guard !requested.isEmpty else {
+            pending = nil
+            return .release
+        }
+        // A reset only helps once the hosts block is in place to catch the reconnection.
+        guard hostsApplied else { return nil }
+        if pending == nil, !requested.isSubset(of: covered) {
+            // Browsers need a moment to notice the hosts change before their connections reset.
+            pending = (requested, now + .seconds(2))
+        }
+        guard let cut = pending, cut.due <= now else { return nil }
+        pending = nil
+        covered = cut.names.intersection(requested)
+        return .cut
     }
 }

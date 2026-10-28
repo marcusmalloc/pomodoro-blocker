@@ -142,6 +142,9 @@ def main():
         before = status_path.stat().st_mtime_ns
         await_value(lambda: status_path.stat().st_mtime_ns > before, "fresh acknowledgment timestamp")
         passed("refresh an unchanged acknowledgment's timestamp")
+        time.sleep(3)
+        assert applied(data) and not (directory / "pf-token").exists()
+        passed("leave pf untouched in test mode past the connection cut delay")
 
         data = request([])
         await_value(lambda: applied(data) and inactive(), "inactive request cleanup")
