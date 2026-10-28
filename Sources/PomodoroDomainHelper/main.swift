@@ -176,16 +176,38 @@ private final class RequestDirectory {
     func respond(requestID: String?, problem: String?) throws {
         var data = try JSONEncoder().encode(DomainResponse(requestID: requestID, problem: problem))
         data.append(0x0a)
-        let temporary = ".status-\(UUID().uuidString)"
-        let status = openat(fd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
-        guard status >= 0 else { throw failure("Couldn't write the helper status") }
+        try publish(data, as: "status.json", mode: 0o644)
+    }
+
+    /// pf keeps an enable reference after the process that took it exits, so a restarted helper needs its token.
+    func filterToken() -> UInt64? {
+        let file = openat(fd, "pf-token", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard file >= 0 else { return nil }
+        defer { close(file) }
+        guard let value = try? metadata(file), isRegular(value), value.st_uid == ownerID, value.st_nlink == 1,
+              (value.st_mode & 0o7777) == 0o600, let data = try? readAll(file, limit: 32) else { return nil }
+        return PacketFilter.token(String(decoding: data, as: UTF8.self))
+    }
+
+    func storeFilterToken(_ token: UInt64) throws {
+        try publish(Data(String(token).utf8), as: "pf-token", mode: 0o600)
+    }
+
+    func removeFilterToken() throws {
+        guard unlinkat(fd, "pf-token", 0) == 0 || errno == ENOENT else { throw failure("Couldn't remove pf-token") }
+    }
+
+    private func publish(_ data: Data, as name: String, mode: mode_t) throws {
+        let temporary = ".\(name)-\(UUID().uuidString)"
+        let file = openat(fd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
+        guard file >= 0 else { throw failure("Couldn't write \(name)") }
         defer {
-            close(status)
+            close(file)
             unlinkat(fd, temporary, 0)
         }
-        guard fchmod(status, 0o644) == 0 else { throw failure("Couldn't protect the helper status") }
-        try writeAll(data, to: status)
-        guard renameat(fd, temporary, fd, "status.json") == 0 else { throw failure("Couldn't publish the helper status") }
+        guard fchmod(file, mode) == 0 else { throw failure("Couldn't protect \(name)") }
+        try writeAll(data, to: file)
+        guard renameat(fd, temporary, fd, name) == 0 else { throw failure("Couldn't publish \(name)") }
     }
 }
 
@@ -203,8 +225,12 @@ private final class HostsWriter {
 
     func apply(_ names: [String]) throws {
         let url = URL(filePath: path)
-        // /etc is a system symlink on macOS. Resolve its parent while refusing a symlink for hosts itself.
-        let parentPath = url.deletingLastPathComponent().resolvingSymlinksInPath().path
+        // Foundation maps canonical /private/etc and /private/tmp back to /etc and /tmp. Those are
+        // symlinks, which O_NOFOLLOW correctly rejects. POSIX realpath retains the actual directory.
+        guard let parentPath = realpath(url.deletingLastPathComponent().path, nil) else {
+            throw failure("Couldn't resolve the hosts directory")
+        }
+        defer { free(parentPath) }
         let parent = open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard parent >= 0 else { throw failure("Couldn't open the hosts directory") }
         defer { close(parent) }
@@ -278,6 +304,68 @@ private final class HostsWriter {
     }
 }
 
+/// Owns this user's pf anchor and enable reference. pfctl gets fixed arguments only, so request data never reaches pf.
+private final class PacketFilterControl {
+    let directory: RequestDirectory
+    let anchor: String
+    /// A crashed helper can leave an anchor or reference behind, so a new one starts by releasing.
+    private var needsRelease = true
+
+    init(directory: RequestDirectory, userID: uid_t) {
+        self.directory = directory
+        anchor = PacketFilter.anchor(for: userID)
+    }
+
+    func cut() throws {
+        needsRelease = true
+        if directory.filterToken() == nil {
+            guard let token = try PacketFilter.enableToken(in: pfctl(["-E"])) else {
+                throw HelperFailure(description: "pfctl -E didn't report an enable token.")
+            }
+            try directory.storeFilterToken(token)
+        }
+        try pfctl(["-a", anchor, "-f", "-"], input: PacketFilter.rules)
+        // pf keeps states while disabled, so a connection admitted during an earlier block would survive.
+        try pfctl(["-k", "0.0.0.0/0"])
+        try pfctl(["-k", "::/0"])
+    }
+
+    func release() throws {
+        guard needsRelease else { return }
+        try pfctl(["-a", anchor, "-F", "rules"])
+        if let token = directory.filterToken() {
+            // The kernel forgets tokens at reboot and on `pfctl -d`. Such a token needs no release.
+            _ = try? pfctl(["-X", String(token)])
+        }
+        try directory.removeFilterToken()
+        needsRelease = false
+    }
+
+    @discardableResult
+    private func pfctl(_ arguments: [String], input: String = "") throws -> String {
+        let process = Process()
+        process.executableURL = URL(filePath: "/sbin/pfctl")
+        process.arguments = arguments
+        let stdin = Pipe(), output = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = output
+        process.standardError = output
+        // Written before launch, so a pfctl that exits early can't raise SIGPIPE in the helper.
+        try stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+        try stdin.fileHandleForWriting.close()
+        do { try process.run() } catch { throw HelperFailure(description: "Couldn't run pfctl.") }
+        // The loop never drains an autorelease pool, so the handle would otherwise keep its descriptor open.
+        let reader = output.fileHandleForReading
+        defer { try? reader.close() }
+        let text = String(decoding: reader.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw HelperFailure(description: text.split(separator: "\n").last.map(String.init) ?? "pfctl failed.")
+        }
+        return text
+    }
+}
+
 private final class StopFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
@@ -295,6 +383,8 @@ private func run(userID: uid_t, hostsPath: String, directoryPath: String, testin
     var startupProblem: String?
     do { try hosts.apply([]) } catch { startupProblem = String(describing: error) }
     let directory = try RequestDirectory(path: directoryPath, userID: userID, testing: testing)
+    let filter = testing ? nil : PacketFilterControl(directory: directory, userID: userID)
+    do { try filter?.release() } catch { startupProblem = startupProblem ?? String(describing: error) }
     try directory.respond(requestID: nil, problem: startupProblem)
 
     let stopped = StopFlag()
@@ -307,6 +397,8 @@ private func run(userID: uid_t, hostsPath: String, directoryPath: String, testin
     }
     defer { for source in signals { source.cancel() } }
     var lastRequest: DomainRequest?
+    var cutoff = ConnectionCutoff()
+    var filterProblem: String?
 
     while !stopped.isStopped {
         var problem: String?
@@ -331,22 +423,40 @@ private func run(userID: uid_t, hostsPath: String, directoryPath: String, testin
             lastRequest = nil
             problem = String(describing: error)
         }
+        let hostsApplied: Bool
         do {
             // Reading the real hosts content each time also repairs a block removed by an old helper or editor.
             try hosts.apply(names)
+            hostsApplied = true
         } catch {
             problem = "Couldn't update the hosts file: \(error)"
+            hostsApplied = false
         }
         do {
             // Refresh the timestamp even for identical acknowledgments so the app can detect daemon death.
-            try directory.respond(requestID: requestID, problem: problem)
+            try directory.respond(requestID: requestID, problem: problem ?? filterProblem)
         } catch { report(String(describing: error)) }
+        // After the acknowledgment, so pfctl never delays it.
+        switch cutoff.update(requested: Set(names), hostsApplied: hostsApplied, now: .now) {
+        case .cut?:
+            do {
+                try filter?.cut()
+                filterProblem = nil
+            } catch { filterProblem = "Couldn't close existing connections: \(error)" }
+        case .release?:
+            do {
+                try filter?.release()
+                filterProblem = nil
+            } catch { filterProblem = "Couldn't remove the connection filter: \(error)" }
+        case nil: break
+        }
         Thread.sleep(forTimeInterval: 0.5)
     }
     do {
         try hosts.apply([])
         try directory.respond(requestID: nil, problem: nil)
     } catch { report("Couldn't remove domain blocks while stopping: \(error)") }
+    do { try filter?.release() } catch { report("Couldn't remove the connection filter while stopping: \(error)") }
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())

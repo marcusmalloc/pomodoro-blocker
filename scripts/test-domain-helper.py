@@ -67,6 +67,7 @@ def main():
     status_path = directory / "status.json"
     helpers = []
     clients = []
+    temporary_hosts_paths = []
     checks = []
 
     def start_helper():
@@ -141,6 +142,9 @@ def main():
         before = status_path.stat().st_mtime_ns
         await_value(lambda: status_path.stat().st_mtime_ns > before, "fresh acknowledgment timestamp")
         passed("refresh an unchanged acknowledgment's timestamp")
+        time.sleep(3)
+        assert applied(data) and not (directory / "pf-token").exists()
+        passed("leave pf untouched in test mode past the connection cut delay")
 
         data = request([])
         await_value(lambda: applied(data) and inactive(), "inactive request cleanup")
@@ -237,6 +241,63 @@ def main():
         helper = start_helper()
         await_value(inactive, "startup stale block cleanup")
         passed("remove stale blocks when the daemon restarts")
+
+        hosts.unlink()
+        hosts.symlink_to(victim)
+        data = request(["hosts-symlink.example"])
+        await_value(lambda: status().get("requestID") == data["id"]
+                    and "Couldn't read the hosts file" in status().get("problem", ""),
+                    "hosts symlink rejected")
+        assert hosts.is_symlink() and victim.read_text() == "must stay unchanged"
+        hosts.unlink()
+        hosts.write_text(base)
+        os.chmod(hosts, 0o640)
+        data = request([])
+        await_value(lambda: applied(data) and inactive(), "regular hosts restored after symlink rejection")
+        passed("reject a hosts-file symlink without touching its target")
+
+        helper.terminate()
+        helper.wait(timeout=5)
+        parent_alias = work / "hosts-parent-alias"
+        parent_alias.symlink_to(work, target_is_directory=True)
+        hosts = parent_alias / "hosts"
+        helper = start_helper()
+        data = request(["parent-symlink.example"])
+        await_value(lambda: applied(data) and "parent-symlink.example" in hosts.read_text(),
+                    "hosts updated through symlinked parent directory")
+        current = hosts.stat()
+        assert hosts.read_text().startswith(base)
+        assert (current.st_mode & 0o777) == 0o640
+        assert current.st_uid == original.st_uid and current.st_gid == original.st_gid
+        data = request([])
+        await_value(lambda: applied(data) and inactive(), "symlinked parent cleanup")
+        assert parent_alias.is_symlink()
+        passed("resolve a hosts parent symlink while preserving entries, ownership and permissions")
+
+        helper.terminate()
+        helper.wait(timeout=5)
+        # /tmp, like /etc, is a macOS system symlink. Foundation can normalize
+        # its resolved URL back to /tmp, which O_NOFOLLOW correctly refuses.
+        # Keep this disposable hosts copy directly inside that symlinked parent
+        # so the integration test exercises the same directory-open behavior.
+        temporary_fd, temporary_path = tempfile.mkstemp(prefix="pomodoro-hosts-copy-", dir="/tmp")
+        os.close(temporary_fd)
+        hosts = Path(temporary_path)
+        temporary_hosts_paths.append(hosts)
+        hosts.write_text(base)
+        os.chmod(hosts, 0o640)
+        original = hosts.stat()
+        helper = start_helper()
+        data = request(["system-parent-symlink.example"])
+        await_value(lambda: applied(data) and "system-parent-symlink.example" in hosts.read_text(),
+                    "hosts copy under the system /tmp symlink updated")
+        current = hosts.stat()
+        assert hosts.read_text().startswith(base)
+        assert (current.st_mode & 0o777) == 0o640
+        assert current.st_uid == original.st_uid and current.st_gid == original.st_gid
+        data = request([])
+        await_value(lambda: applied(data) and inactive(), "system symlink parent cleanup")
+        passed("update a disposable hosts copy directly under the macOS /tmp system symlink")
         print(f"{len(checks)} helper integration checks passed.", flush=True)
     finally:
         for client in clients:
@@ -251,6 +312,8 @@ def main():
             if errors:
                 print(errors)
             process.stderr.close()
+        for temporary_hosts in temporary_hosts_paths:
+            temporary_hosts.unlink(missing_ok=True)
         shutil.rmtree(work)
 
 
