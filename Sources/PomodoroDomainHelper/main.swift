@@ -343,26 +343,27 @@ private final class PacketFilterControl {
 
     @discardableResult
     private func pfctl(_ arguments: [String], input: String = "") throws -> String {
-        let process = Process()
-        process.executableURL = URL(filePath: "/sbin/pfctl")
-        process.arguments = arguments
-        let stdin = Pipe(), output = Pipe()
-        process.standardInput = stdin
-        process.standardOutput = output
-        process.standardError = output
-        // Written before launch, so a pfctl that exits early can't raise SIGPIPE in the helper.
-        try stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
-        try stdin.fileHandleForWriting.close()
-        do { try process.run() } catch { throw HelperFailure(description: "Couldn't run pfctl.") }
-        // The loop never drains an autorelease pool, so the handle would otherwise keep its descriptor open.
-        let reader = output.fileHandleForReading
-        defer { try? reader.close() }
-        let text = String(decoding: reader.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw HelperFailure(description: text.split(separator: "\n").last.map(String.init) ?? "pfctl failed.")
+        // The loop never drains an autorelease pool, so pipe handles would otherwise keep their descriptors open,
+        // including after a failed launch.
+        try autoreleasepool {
+            let process = Process()
+            process.executableURL = URL(filePath: "/sbin/pfctl")
+            process.arguments = arguments
+            let stdin = Pipe(), output = Pipe()
+            process.standardInput = stdin
+            process.standardOutput = output
+            process.standardError = output
+            // Written before launch, so a pfctl that exits early can't raise SIGPIPE in the helper.
+            try stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+            try stdin.fileHandleForWriting.close()
+            do { try process.run() } catch { throw HelperFailure(description: "Couldn't run pfctl.") }
+            let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw HelperFailure(description: text.split(separator: "\n").last.map(String.init) ?? "pfctl failed.")
+            }
+            return text
         }
-        return text
     }
 }
 
